@@ -89,29 +89,51 @@ for lib in $(collect_dylibs "$HELPERS_DIR/gs"); do
 done
 
 # 3. Handle @rpath dependencies (e.g. libsharpyuv)
+#    Build a list of brew lib search paths (cellar paths vary by formula)
+BREW_PREFIX="$(brew --prefix)"
+BREW_SEARCH_DIRS="$BREW_PREFIX/lib"
+# Add cellar lib dirs for formulas known to provide @rpath libs
+for formula in libwebp sharpyuv webp; do
+    formula_prefix="$(brew --prefix "$formula" 2>/dev/null || true)"
+    if [ -n "$formula_prefix" ] && [ -d "$formula_prefix/lib" ]; then
+        BREW_SEARCH_DIRS="$BREW_SEARCH_DIRS $formula_prefix/lib"
+    fi
+done
+
+resolve_rpath_lib() {
+    local rpath_name="$1"
+    for search_dir in $BREW_SEARCH_DIRS; do
+        if [ -f "$search_dir/$rpath_name" ]; then
+            echo "$search_dir/$rpath_name"
+            return
+        fi
+    done
+    # Fallback: ask find in the brew prefix
+    find "$BREW_PREFIX" -name "$rpath_name" -type f 2>/dev/null | head -1
+}
+
 echo "--- Fixing @rpath references ---"
 for fw in "$FRAMEWORKS_DIR"/*.dylib; do
-    otool -L "$fw" 2>/dev/null | tail -n +2 | awk '{print $1}' | while read -r ref; do
-        case "$ref" in
-            @rpath/*)
-                rpath_name=$(basename "$ref")
-                # Try to find the library in common brew locations
-                found=""
-                for search in /opt/homebrew/lib /usr/local/lib; do
-                    if [ -f "$search/$rpath_name" ]; then
-                        found="$search/$rpath_name"
-                        break
-                    fi
-                done
-                if [ -n "$found" ] && [ ! -f "$FRAMEWORKS_DIR/$rpath_name" ]; then
-                    echo "  Resolving @rpath: $rpath_name from $found"
-                    cp "$found" "$FRAMEWORKS_DIR/$rpath_name"
-                    chmod 644 "$FRAMEWORKS_DIR/$rpath_name"
-                    install_name_tool -id "@loader_path/$rpath_name" "$FRAMEWORKS_DIR/$rpath_name" 2>/dev/null || true
-                fi
-                install_name_tool -change "$ref" "@loader_path/$rpath_name" "$fw" 2>/dev/null || true
-                ;;
-        esac
+    # Collect @rpath refs into an array to avoid pipe+set -e issues
+    rpath_refs=()
+    while IFS= read -r ref; do
+        rpath_refs+=("$ref")
+    done < <(otool -L "$fw" 2>/dev/null | tail -n +2 | awk '{print $1}' | grep '^@rpath/' || true)
+
+    for ref in "${rpath_refs[@]+"${rpath_refs[@]}"}"; do
+        rpath_name=$(basename "$ref")
+        if [ ! -f "$FRAMEWORKS_DIR/$rpath_name" ]; then
+            found=$(resolve_rpath_lib "$rpath_name")
+            if [ -n "$found" ]; then
+                echo "  Resolving @rpath: $rpath_name from $found"
+                cp "$found" "$FRAMEWORKS_DIR/$rpath_name"
+                chmod 644 "$FRAMEWORKS_DIR/$rpath_name"
+                install_name_tool -id "@loader_path/$rpath_name" "$FRAMEWORKS_DIR/$rpath_name" 2>/dev/null || true
+            else
+                echo "  WARNING: could not resolve @rpath/$rpath_name anywhere under $BREW_PREFIX"
+            fi
+        fi
+        install_name_tool -change "$ref" "@loader_path/$rpath_name" "$fw" 2>/dev/null || true
     done
 done
 
@@ -124,25 +146,27 @@ codesign --force --sign - "$HELPERS_DIR/gs" 2>/dev/null || true
 
 # 5. Copy Ghostscript resource files (fonts, ICC profiles, init scripts)
 GS_SHARE="$GS_PREFIX/share/ghostscript"
-GS_VERSION=$(ls "$GS_SHARE" | grep -E '^[0-9]' | head -1)
-if [ -n "$GS_VERSION" ]; then
-    GS_RES="$GS_SHARE/$GS_VERSION"
-    echo "--- Copying Ghostscript resources ($GS_VERSION) ---"
-    # Copy lib/ (PostScript init files - essential for gs to run)
-    if [ -d "$GS_RES/lib" ]; then
-        cp -R "$GS_RES/lib" "$RESOURCES_DIR/gs_lib"
+if [ -d "$GS_SHARE" ]; then
+    GS_VERSION=$(ls "$GS_SHARE" | grep -E '^[0-9]' | head -1 || true)
+    if [ -n "$GS_VERSION" ]; then
+        GS_RES="$GS_SHARE/$GS_VERSION"
+        echo "--- Copying Ghostscript resources ($GS_VERSION) ---"
+        # Copy lib/ (PostScript init files - essential for gs to run)
+        if [ -d "$GS_RES/lib" ]; then
+            cp -R "$GS_RES/lib" "$RESOURCES_DIR/gs_lib"
+        fi
+        # Copy Resource/Init if exists
+        if [ -d "$GS_RES/Resource" ]; then
+            cp -R "$GS_RES/Resource" "$RESOURCES_DIR/gs_Resource"
+        fi
+        # Copy iccprofiles if exists
+        if [ -d "$GS_RES/iccprofiles" ]; then
+            cp -R "$GS_RES/iccprofiles" "$RESOURCES_DIR/gs_iccprofiles"
+        fi
     fi
-    # Copy Resource/Init if exists
-    if [ -d "$GS_RES/Resource" ]; then
-        cp -R "$GS_RES/Resource" "$RESOURCES_DIR/gs_Resource"
-    fi
-    # Copy iccprofiles if exists
-    if [ -d "$GS_RES/iccprofiles" ]; then
-        cp -R "$GS_RES/iccprofiles" "$RESOURCES_DIR/gs_iccprofiles"
-    fi
+else
+    echo "WARNING: GS_SHARE directory not found at $GS_SHARE"
 fi
-
-echo "=== Done. Bundle contents: ==="
 echo "Helpers:"
 ls -la "$HELPERS_DIR"
 echo "Frameworks:"
