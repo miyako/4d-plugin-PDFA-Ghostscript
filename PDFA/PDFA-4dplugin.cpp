@@ -181,15 +181,58 @@ static void doPdfToPdfa(PA_PluginParameters params) {
     fullCmd = "cd " + shellEscape(resPath) + " && " + cmd;
 #endif
 
-    int exitCode = system(fullCmd.c_str());
+    /* Redirect stderr to a temp file for error reporting */
+    std::string stderrFile;
+#ifdef _WIN32
+    char tmpPath[MAX_PATH];
+    GetTempPathA(MAX_PATH, tmpPath);
+    stderrFile = std::string(tmpPath) + "pdfa_gs_stderr.txt";
+    fullCmd += " 2>" + shellEscape(stderrFile);
+#else
+    stderrFile = "/tmp/pdfa_gs_stderr.txt";
+    fullCmd += " 2>" + shellEscape(stderrFile);
+#endif
+
+    int rawStatus = system(fullCmd.c_str());
+
+    /* Extract actual exit code (system() returns raw waitpid status on Unix) */
+    int exitCode;
+#ifdef _WIN32
+    exitCode = rawStatus;
+#else
+    if (WIFEXITED(rawStatus)) {
+        exitCode = WEXITSTATUS(rawStatus);
+    } else {
+        exitCode = rawStatus;
+    }
+#endif
 
     if (exitCode != 0) {
-        char msg[512];
-        snprintf(msg, sizeof(msg),
-            "Ghostscript conversion failed (exit code %d)", exitCode);
+        /* Read stderr for error details */
+        std::string errMsg;
+        FILE* fp = fopen(stderrFile.c_str(), "r");
+        if (fp) {
+            char buf[4096];
+            size_t n = fread(buf, 1, sizeof(buf) - 1, fp);
+            buf[n] = '\0';
+            fclose(fp);
+            errMsg = buf;
+        }
+        remove(stderrFile.c_str());
+
+        char msg[8192];
+        if (!errMsg.empty()) {
+            snprintf(msg, sizeof(msg),
+                "Ghostscript failed (exit %d): %s", exitCode, errMsg.c_str());
+        } else {
+            snprintf(msg, sizeof(msg),
+                "Ghostscript failed (exit %d)", exitCode);
+        }
         returnStatus(params, exitCode, msg);
         return;
     }
+
+    remove(stderrFile.c_str());
 
     returnStatus(params, 0, "PDF/A-3 conversion successful");
 }
