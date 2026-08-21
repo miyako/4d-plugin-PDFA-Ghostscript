@@ -41,6 +41,28 @@ collect_dylibs() {
     done
 }
 
+# Build a list of brew lib search paths for resolving @rpath references
+BREW_PREFIX="$(brew --prefix)"
+BREW_SEARCH_DIRS="$BREW_PREFIX/lib"
+for formula in libwebp sharpyuv webp; do
+    formula_prefix="$(brew --prefix "$formula" 2>/dev/null || true)"
+    if [ -n "$formula_prefix" ] && [ -d "$formula_prefix/lib" ]; then
+        BREW_SEARCH_DIRS="$BREW_SEARCH_DIRS $formula_prefix/lib"
+    fi
+done
+
+resolve_rpath_lib() {
+    local rpath_name="$1"
+    for search_dir in $BREW_SEARCH_DIRS; do
+        if [ -f "$search_dir/$rpath_name" ] || [ -L "$search_dir/$rpath_name" ]; then
+            echo "$search_dir/$rpath_name"
+            return
+        fi
+    done
+    # Fallback: search the entire brew prefix (follow symlinks)
+    find -L "$BREW_PREFIX" -name "$rpath_name" \( -type f -o -type l \) 2>/dev/null | head -1
+}
+
 # Recursively collect all needed dylibs
 copy_dylib() {
     local lib_path="$1"
@@ -52,11 +74,19 @@ copy_dylib() {
         return
     fi
 
-    # Resolve symlinks
-    local real_path
-    real_path=$(realpath "$lib_path" 2>/dev/null || echo "$lib_path")
+    # Resolve the actual file path
+    local real_path=""
+    case "$lib_path" in
+        @rpath/*|@loader_path/*|@executable_path/*)
+            # Can't resolve directly — search brew paths
+            real_path=$(resolve_rpath_lib "$lib_name")
+            ;;
+        *)
+            real_path=$(realpath "$lib_path" 2>/dev/null || echo "$lib_path")
+            ;;
+    esac
 
-    if [ ! -f "$real_path" ]; then
+    if [ -z "$real_path" ] || [ ! -f "$real_path" ]; then
         echo "  WARNING: cannot find $lib_path"
         return
     fi
@@ -88,32 +118,8 @@ for lib in $(collect_dylibs "$HELPERS_DIR/gs"); do
     copy_dylib "$lib"
 done
 
-# 3. Handle @rpath dependencies (e.g. libsharpyuv)
-#    Build a list of brew lib search paths (cellar paths vary by formula)
-BREW_PREFIX="$(brew --prefix)"
-BREW_SEARCH_DIRS="$BREW_PREFIX/lib"
-# Add cellar lib dirs for formulas known to provide @rpath libs
-for formula in libwebp sharpyuv webp; do
-    formula_prefix="$(brew --prefix "$formula" 2>/dev/null || true)"
-    if [ -n "$formula_prefix" ] && [ -d "$formula_prefix/lib" ]; then
-        BREW_SEARCH_DIRS="$BREW_SEARCH_DIRS $formula_prefix/lib"
-    fi
-done
-
-resolve_rpath_lib() {
-    local rpath_name="$1"
-    for search_dir in $BREW_SEARCH_DIRS; do
-        # -L follows symlinks; check file or symlink
-        if [ -f "$search_dir/$rpath_name" ] || [ -L "$search_dir/$rpath_name" ]; then
-            echo "$search_dir/$rpath_name"
-            return
-        fi
-    done
-    # Fallback: search the entire brew prefix (follow symlinks)
-    find -L "$BREW_PREFIX" -name "$rpath_name" \( -type f -o -type l \) 2>/dev/null | head -1
-}
-
-echo "--- Fixing @rpath references ---"
+# 3. Verify all @rpath references were resolved (second pass)
+echo "--- Verifying @rpath references ---"
 echo "  Search dirs: $BREW_SEARCH_DIRS"
 for fw in "$FRAMEWORKS_DIR"/*.dylib; do
     # Collect @rpath refs into an array to avoid pipe+set -e issues
