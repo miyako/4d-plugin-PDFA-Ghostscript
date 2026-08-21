@@ -103,16 +103,18 @@ done
 resolve_rpath_lib() {
     local rpath_name="$1"
     for search_dir in $BREW_SEARCH_DIRS; do
-        if [ -f "$search_dir/$rpath_name" ]; then
+        # -L follows symlinks; check file or symlink
+        if [ -f "$search_dir/$rpath_name" ] || [ -L "$search_dir/$rpath_name" ]; then
             echo "$search_dir/$rpath_name"
             return
         fi
     done
-    # Fallback: ask find in the brew prefix
-    find "$BREW_PREFIX" -name "$rpath_name" -type f 2>/dev/null | head -1
+    # Fallback: search the entire brew prefix (follow symlinks)
+    find -L "$BREW_PREFIX" -name "$rpath_name" \( -type f -o -type l \) 2>/dev/null | head -1
 }
 
 echo "--- Fixing @rpath references ---"
+echo "  Search dirs: $BREW_SEARCH_DIRS"
 for fw in "$FRAMEWORKS_DIR"/*.dylib; do
     # Collect @rpath refs into an array to avoid pipe+set -e issues
     rpath_refs=()
