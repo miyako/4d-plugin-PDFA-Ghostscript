@@ -1,0 +1,112 @@
+name: Build and Test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  PRODUCT_NAME: PDFA
+
+jobs:
+  build-mac:
+    name: Build macOS (arm64)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Ghostscript
+        run: brew install ghostscript
+
+      - name: Build with CMake
+        run: |
+          cd PDFA
+          mkdir cmake-build && cd cmake-build
+          cmake .. -DCMAKE_BUILD_TYPE=Release
+          cmake --build .
+
+      - name: Bundle Ghostscript
+        run: |
+          chmod +x PDFA/bundle-gs.sh
+          PDFA/bundle-gs.sh PDFA/cmake-build/PDFA.bundle
+
+      - name: Verify exports
+        run: |
+          nm -gU PDFA/cmake-build/PDFA.bundle/Contents/MacOS/PDFA | grep _PluginMain
+          nm -gU PDFA/cmake-build/PDFA.bundle/Contents/MacOS/PDFA | grep _FourDPackex
+
+      - name: Verify bundle structure
+        run: |
+          test -f PDFA/cmake-build/PDFA.bundle/Contents/Resources/manifest.json
+          test -f PDFA/cmake-build/PDFA.bundle/Contents/Resources/sRGB.icc
+          test -f PDFA/cmake-build/PDFA.bundle/Contents/Resources/PDFA_def.ps
+          test -x PDFA/cmake-build/PDFA.bundle/Contents/Helpers/gs
+          ls PDFA/cmake-build/PDFA.bundle/Contents/Frameworks/*.dylib | head -5
+
+      - name: Test bundled gs runs
+        run: |
+          BUNDLE=PDFA/cmake-build/PDFA.bundle
+          DYLD_LIBRARY_PATH="$BUNDLE/Contents/Frameworks" \
+          GS_LIB="$BUNDLE/Contents/Resources/gs_lib:$BUNDLE/Contents/Resources/gs_Resource/Init" \
+          "$BUNDLE/Contents/Helpers/gs" --version
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: PDFA-macOS
+          path: PDFA/cmake-build/PDFA.bundle
+
+  build-windows:
+    name: Build Windows (x64)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Ghostscript
+        shell: pwsh
+        run: choco install ghostscript --yes
+
+      - name: Build with CMake
+        shell: pwsh
+        run: |
+          cd PDFA
+          mkdir cmake-build; cd cmake-build
+          cmake .. -A x64
+          cmake --build . --config Release
+
+      - name: Bundle Ghostscript
+        shell: pwsh
+        run: |
+          $gsPath = (Get-ChildItem "C:\Program Files\gs" -Directory | Sort-Object Name -Descending | Select-Object -First 1).FullName
+          $pluginDir = "PDFA/cmake-build/PDFA/Contents/Windows64"
+          mkdir -p "$pluginDir" -Force
+          # Copy plugin DLL
+          Copy-Item "PDFA/cmake-build/Release/PDFA.dll" "$pluginDir/PDFA.4DX"
+          # Copy gs binaries
+          Copy-Item "$gsPath\bin\gswin64c.exe" "$pluginDir\"
+          Copy-Item "$gsPath\bin\gsdll64.dll" "$pluginDir\"
+          # Copy resources
+          $resDir = "PDFA/cmake-build/PDFA/Contents/Resources"
+          mkdir -p "$resDir" -Force
+          Copy-Item "PDFA/manifest.json" "$resDir\"
+          Copy-Item "PDFA/resources/sRGB.icc" "$resDir\"
+          Copy-Item "PDFA/resources/PDFA_def.ps" "$resDir\"
+          if (Test-Path "$gsPath\lib") { Copy-Item "$gsPath\lib" "$resDir\gs_lib" -Recurse }
+          if (Test-Path "$gsPath\Resource") { Copy-Item "$gsPath\Resource" "$resDir\gs_Resource" -Recurse }
+
+      - name: Verify bundled gs runs
+        shell: pwsh
+        run: |
+          $pluginDir = "PDFA/cmake-build/PDFA/Contents/Windows64"
+          & "$pluginDir\gswin64c.exe" --version
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: PDFA-Windows
+          path: PDFA/cmake-build/PDFA/
