@@ -1,0 +1,210 @@
+name: Build & Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing tag to build (e.g. v2.3.0)
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  PRODUCT_NAME: PDFA
+  MACOS_DEPLOYMENT_TARGET: '10.13'
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.set.outputs.tag }}
+      version: ${{ steps.set.outputs.version }}
+    steps:
+      - id: set
+        run: |
+          TAG="${{ inputs.tag || github.ref_name }}"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+
+  build-windows:
+    name: Build Windows (x64)
+    needs: version
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.version.outputs.tag }}
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Install Ghostscript
+        shell: pwsh
+        run: |
+          choco install ghostscript --yes
+          # Find gs install path
+          $gsPath = (Get-ChildItem "C:\Program Files\gs" -Directory | Sort-Object Name -Descending | Select-Object -First 1).FullName
+          echo "GS_PATH=$gsPath" >> $env:GITHUB_ENV
+
+      - name: Build with CMake
+        shell: pwsh
+        run: |
+          cd ${{ env.PRODUCT_NAME }}
+          mkdir cmake-build; cd cmake-build
+          cmake .. -A x64
+          cmake --build . --config Release
+
+      - name: Bundle Ghostscript into plugin
+        shell: pwsh
+        run: |
+          $pluginDir = "${{ env.PRODUCT_NAME }}/${{ env.PRODUCT_NAME }}-test/Plugins/${{ env.PRODUCT_NAME }}/Contents/Windows64"
+          # Copy gswin64c.exe and gsdll64.dll
+          Copy-Item "$env:GS_PATH\bin\gswin64c.exe" "$pluginDir\"
+          Copy-Item "$env:GS_PATH\bin\gsdll64.dll" "$pluginDir\"
+          # Copy gs resource files
+          $resDir = "${{ env.PRODUCT_NAME }}/${{ env.PRODUCT_NAME }}-test/Plugins/${{ env.PRODUCT_NAME }}/Contents/Resources"
+          $gsLib = Get-ChildItem "$env:GS_PATH\lib" -Directory | Select-Object -First 1
+          if (Test-Path "$env:GS_PATH\lib") { Copy-Item "$env:GS_PATH\lib" "$resDir\gs_lib" -Recurse }
+          $gsRes = Get-ChildItem "$env:GS_PATH\Resource" -ErrorAction SilentlyContinue
+          if ($gsRes) { Copy-Item "$env:GS_PATH\Resource" "$resDir\gs_Resource" -Recurse }
+
+      - name: Upload Windows binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-binaries
+          path: |
+            ${{ env.PRODUCT_NAME }}/${{ env.PRODUCT_NAME }}-test/Plugins/${{ env.PRODUCT_NAME }}/
+          if-no-files-found: error
+
+  build-macos:
+    name: Build macOS, bundle GS, sign, notarize & release
+    needs: [version, build-windows]
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.version.outputs.tag }}
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Install Ghostscript
+        run: brew install ghostscript
+
+      - name: Download Windows binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: windows-binaries
+          path: winbuild
+
+      - name: Import Developer ID certificate
+        env:
+          CERT_BASE64: ${{ secrets.APPLE_DEVELOPER_ID_CERTIFICATE }}
+          CERT_PASSWORD: ${{ secrets.APPLE_DEVELOPER_ID_CERTIFICATE_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+        run: |
+          set -euo pipefail
+          KEYCHAIN_PATH="$RUNNER_TEMP/build.keychain-db"
+          CERT_PATH="$RUNNER_TEMP/certificate.p12"
+
+          echo -n "$CERT_BASE64" | base64 --decode -o "$CERT_PATH"
+
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security import "$CERT_PATH" -P "$CERT_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
+          security list-keychain -d user -s "$KEYCHAIN_PATH" login.keychain
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+
+          echo "KEYCHAIN_PATH=$KEYCHAIN_PATH" >> "$GITHUB_ENV"
+
+      - name: Store notarytool credentials
+        env:
+          APPLE_ID: ${{ secrets.NOTARYTOOL_APPLE_ID }}
+          TEAM_ID: ${{ secrets.NOTARYTOOL_TEAM_ID }}
+          APP_PASSWORD: ${{ secrets.NOTARYTOOL_PASSWORD }}
+        run: |
+          xcrun notarytool store-credentials "notarytool-profile" \
+            --apple-id "$APPLE_ID" \
+            --team-id "$TEAM_ID" \
+            --password "$APP_PASSWORD" \
+            --keychain "$KEYCHAIN_PATH"
+
+      - name: Build macOS plugin
+        run: |
+          cd ${{ env.PRODUCT_NAME }}
+          mkdir -p cmake-build && cd cmake-build
+          cmake .. -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET="${{ env.MACOS_DEPLOYMENT_TARGET }}"
+          cmake --build .
+
+      - name: Bundle Ghostscript into plugin
+        run: |
+          BUNDLE="${{ env.PRODUCT_NAME }}/cmake-build/PDFA.bundle"
+          chmod +x ${{ env.PRODUCT_NAME }}/bundle-gs.sh
+          ${{ env.PRODUCT_NAME }}/bundle-gs.sh "$BUNDLE"
+
+      - name: Merge Windows binaries into the bundle
+        run: |
+          set -euo pipefail
+          BUNDLE="${{ env.PRODUCT_NAME }}/cmake-build/PDFA.bundle"
+          cp -R winbuild/Contents/Windows64 "$BUNDLE/Contents/Windows64"
+          # Merge Windows Resources (gs_lib, gs_Resource) if not already present
+          if [ -d "winbuild/Contents/Resources/gs_lib" ] && [ ! -d "$BUNDLE/Contents/Resources/gs_lib" ]; then
+            cp -R winbuild/Contents/Resources/gs_lib "$BUNDLE/Contents/Resources/"
+          fi
+          echo "BUNDLE_PATH=$BUNDLE" >> "$GITHUB_ENV"
+
+      - name: Codesign all binaries
+        run: |
+          set -euo pipefail
+          IDENTITY=$(security find-identity -v -p codesigning "$KEYCHAIN_PATH" \
+            | grep "Developer ID Application" | head -1 | sed -E 's/.*"(.*)".*/\1/')
+          echo "Signing with: $IDENTITY"
+
+          # Sign frameworks individually first
+          for lib in "$BUNDLE_PATH"/Contents/Frameworks/*.dylib; do
+            codesign --verbose --timestamp --force --options=runtime \
+              --sign "$IDENTITY" "$lib"
+          done
+
+          # Sign the gs helper
+          codesign --verbose --timestamp --force --options=runtime \
+            --sign "$IDENTITY" "$BUNDLE_PATH/Contents/Helpers/gs"
+
+          # Sign the main bundle
+          codesign --verbose --deep --timestamp --force --options=runtime \
+            --sign "$IDENTITY" "$BUNDLE_PATH"
+
+      - name: Package, notarize & staple
+        run: |
+          set -euo pipefail
+          VERSION="${{ needs.version.outputs.version }}"
+          ZIP_PATH="${{ env.PRODUCT_NAME }}-${VERSION}.zip"
+          DMG_PATH="${{ env.PRODUCT_NAME }}-${VERSION}.dmg"
+
+          ditto -c -k --keepParent "$BUNDLE_PATH" "$ZIP_PATH"
+          hdiutil create -format UDBZ -volname "${{ env.PRODUCT_NAME }}" -srcfolder "$BUNDLE_PATH" "$DMG_PATH"
+
+          xcrun notarytool submit "$ZIP_PATH" --keychain-profile "notarytool-profile" --keychain "$KEYCHAIN_PATH" --wait
+          xcrun notarytool submit "$DMG_PATH" --keychain-profile "notarytool-profile" --keychain "$KEYCHAIN_PATH" --wait
+          xcrun stapler staple "$DMG_PATH"
+
+          echo "ZIP_PATH=$ZIP_PATH" >> "$GITHUB_ENV"
+          echo "DMG_PATH=$DMG_PATH" >> "$GITHUB_ENV"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.version.outputs.tag }}
+          name: ${{ needs.version.outputs.tag }}
+          files: |
+            ${{ env.ZIP_PATH }}
+            ${{ env.DMG_PATH }}

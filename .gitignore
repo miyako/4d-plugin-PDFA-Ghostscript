@@ -1,0 +1,9 @@
+# Build
+cmake-build/
+PDFA/cmake-build/
+
+# Bundled test plugins (too large for git, built by CI)
+PDFA/PDFA-test/Plugins/
+
+# macOS
+.DS_Store
