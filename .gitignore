@@ -7,3 +7,5 @@ PDFA/PDFA-test/Plugins/
 
 # macOS
 .DS_Store
+PDFA/PDFA-test/Project/DerivedData/*
+PDFA/PDFA-test/userPreferences.*
