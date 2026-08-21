@@ -84,15 +84,15 @@ jobs:
         run: |
           $gsPath = (Get-ChildItem "C:\Program Files\gs" -Directory | Sort-Object Name -Descending | Select-Object -First 1).FullName
           $pluginDir = "PDFA/cmake-build/PDFA/Contents/Windows64"
-          mkdir -p "$pluginDir" -Force
-          # Copy plugin DLL
-          Copy-Item "PDFA/cmake-build/Release/PDFA.dll" "$pluginDir/PDFA.4DX"
+          New-Item -ItemType Directory -Path "$pluginDir" -Force | Out-Null
+          # Copy plugin DLL (already named .4DX by CMake)
+          Copy-Item "PDFA/cmake-build/Release/PDFA.4DX" "$pluginDir\"
           # Copy gs binaries
           Copy-Item "$gsPath\bin\gswin64c.exe" "$pluginDir\"
           Copy-Item "$gsPath\bin\gsdll64.dll" "$pluginDir\"
           # Copy resources
           $resDir = "PDFA/cmake-build/PDFA/Contents/Resources"
-          mkdir -p "$resDir" -Force
+          New-Item -ItemType Directory -Path "$resDir" -Force | Out-Null
           Copy-Item "PDFA/manifest.json" "$resDir\"
           Copy-Item "PDFA/resources/sRGB.icc" "$resDir\"
           Copy-Item "PDFA/resources/PDFA_def.ps" "$resDir\"
