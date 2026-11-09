@@ -84,12 +84,17 @@ The manifest and 4D project schema versions are not release versions.
    merged plugin, signing with Developer ID, and notarizing ZIP/DMG packages.
    The stapled DMG is validated and packages are retained as workflow artifacts.
    Only after these steps succeed does it recheck availability, push a
-   non-force `vX.Y.Z` tag at the exact selected SHA, and create a new release.
+   non-force `vX.Y.Z` tag at the exact selected SHA, and create a new published
+   release via a create-only REST POST with generated notes. Assets are uploaded
+   separately without `--clobber`; `gh release create` is deliberately avoided
+   because its failure cleanup can delete a temporary draft.
 
 Publication serializes across all branches. API/authentication/network errors
 fail closed, and existing tags/releases are never replaced. If release creation
-fails after tag push, the tag remains: inspect the tag, any release, and retained
-package artifacts and recover manually. Reruns reject that tag; there is no
+or asset upload fails after tag push, the tag and any created release/uploaded
+assets remain. A published release may temporarily have incomplete assets:
+inspect the tag, release, assets, and retained package artifacts and recover
+manually. Reruns reject that tag; there is no
 automatic deletion, overwrite, or rollback. Tag pushes do not start Build.
 
 The existing **Build and Test** workflow remains automatic for pushes and pull

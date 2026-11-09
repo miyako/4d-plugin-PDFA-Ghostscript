@@ -2,6 +2,7 @@
 """Coordinated source versions and fail-closed, create-only publication."""
 
 import argparse
+import json
 import os
 from pathlib import Path
 import plistlib
@@ -77,12 +78,22 @@ def publish(root, repo, sha, assets):
     subprocess.run(["git", "push", "--no-follow-tags", "origin",
                     f"refs/tags/{tag}:refs/tags/{tag}"], check=True)
     try:
-        subprocess.run(["gh", "release", "create", tag, "--repo", repo,
-                        "--verify-tag", "--target", sha, "--title", tag,
-                        "--generate-notes", *assets], check=True)
+        # gh release create may delete its temporary draft on upload failure.
+        subprocess.run(["gh", "api", "--method", "POST", f"repos/{repo}/releases",
+                        "--input", "-"], input=json.dumps({
+                            "tag_name": tag,
+                            "target_commitish": sha,
+                            "name": tag,
+                            "draft": False,
+                            "prerelease": False,
+                            "generate_release_notes": True,
+                        }), text=True, stdout=subprocess.DEVNULL, check=True)
+        subprocess.run(["gh", "release", "upload", tag, "--repo", repo, *assets],
+                       check=True)
     except subprocess.CalledProcessError:
-        print(f"ERROR: {tag} was pushed, but release creation failed. "
-              "Inspect the remote tag/release and recover manually; "
+        print(f"ERROR: {tag} was pushed, but release creation or asset upload failed. "
+              "The release may exist with incomplete assets. "
+              "Inspect the remote tag/release/assets and recover manually; "
               "nothing will be deleted or overwritten.", file=sys.stderr)
         raise
 

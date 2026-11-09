@@ -1,6 +1,7 @@
 import contextlib
 import importlib.util
 import io
+import json
 import os
 from pathlib import Path
 import plistlib
@@ -145,9 +146,15 @@ class PublicationTests(unittest.TestCase):
         self.assertEqual(events[1], ["git", "tag", tag, SHA])
         self.assertEqual(events[2], ["git", "push", "--no-follow-tags", "origin",
                                      f"refs/tags/{tag}:refs/tags/{tag}"])
-        self.assertEqual(events[3][:4], ["gh", "release", "create", tag])
-        self.assertIn("--verify-tag", events[3])
-        self.assertEqual(events[3][events[3].index("--target") + 1], SHA)
+        self.assertEqual(events[3], ["gh", "api", "--method", "POST",
+                                     "repos/owner/repo/releases", "--input", "-"])
+        self.assertEqual(json.loads(run.call_args_list[2].kwargs["input"]), {
+            "tag_name": tag, "target_commitish": SHA, "name": tag,
+            "draft": False, "prerelease": False, "generate_release_notes": True,
+        })
+        self.assertEqual(events[4], ["gh", "release", "upload", tag, "--repo",
+                                     "owner/repo", str(self.asset)])
+        self.assertNotIn("--clobber", events[4])
 
     @patch.object(release.subprocess, "run")
     @patch.object(release.subprocess, "check_output", return_value=SHA + "\n")
@@ -170,12 +177,53 @@ class PublicationTests(unittest.TestCase):
     @patch.object(release.subprocess, "check_output", return_value=SHA + "\n")
     @patch.object(release, "check_available")
     def test_partial_failure_is_explicit_and_never_deletes(self, available, head, run):
-        run.side_effect = [None, None, subprocess.CalledProcessError(1, "gh release create")]
-        stderr = io.StringIO()
-        with contextlib.redirect_stderr(stderr), self.assertRaises(subprocess.CalledProcessError):
-            release.publish(ROOT, "owner/repo", SHA, [str(self.asset)])
-        self.assertIn("was pushed", stderr.getvalue())
-        self.assertEqual(run.call_count, 3)
+        for successful_calls in (2, 3):
+            with self.subTest(successful_calls=successful_calls):
+                run.reset_mock()
+                run.side_effect = [None] * successful_calls + [
+                    subprocess.CalledProcessError(1, "publication failure")]
+                stderr = io.StringIO()
+                with contextlib.redirect_stderr(stderr), self.assertRaises(subprocess.CalledProcessError):
+                    release.publish(ROOT, "owner/repo", SHA, [str(self.asset)])
+                self.assertIn("was pushed", stderr.getvalue())
+                self.assertIn("incomplete assets", stderr.getvalue())
+                self.assertEqual(run.call_count, successful_calls + 1)
+                self.assert_no_destructive_commands(run)
+
+    def assert_no_destructive_commands(self, run):
+        for call in run.call_args_list:
+            command = call.args[0]
+            for forbidden in ("DELETE", "PATCH", "PUT", "--clobber", "--force",
+                              "--delete", "delete", "edit", "create"):
+                self.assertNotIn(forbidden, command)
+
+    @patch.object(release.subprocess, "run")
+    @patch.object(release.subprocess, "check_output", return_value=SHA + "\n")
+    @patch.object(release, "check_available")
+    def test_api_timeout_or_partial_upload_preserves_remote_state(self, available, head, run):
+        for failure in ("create", "upload"):
+            with self.subTest(failure=failure):
+                state = {"tag": False, "release": False, "assets": []}
+
+                def command(args, **kwargs):
+                    if args[:2] == ["git", "push"]:
+                        state["tag"] = True
+                    elif args[:2] == ["gh", "api"]:
+                        state["release"] = True
+                        if failure == "create":
+                            raise subprocess.CalledProcessError(1, args)
+                    elif args[:3] == ["gh", "release", "upload"]:
+                        state["assets"].append(self.asset.name)
+                        raise subprocess.CalledProcessError(1, args)
+
+                run.reset_mock()
+                run.side_effect = command
+                with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(subprocess.CalledProcessError):
+                    release.publish(ROOT, "owner/repo", SHA, [str(self.asset)])
+                self.assertTrue(state["tag"])
+                self.assertTrue(state["release"])
+                self.assertEqual(state["assets"], [] if failure == "create" else [self.asset.name])
+                self.assert_no_destructive_commands(run)
 
     @patch.object(release.subprocess, "run")
     @patch.object(release.subprocess, "check_output", return_value="b" * 40)
