@@ -47,19 +47,41 @@ def bump(root, mode):
 
 
 def check_available(repo, tag):
-    for endpoint in (f"git/ref/tags/{tag}", f"releases/tags/{tag}"):
-        result = subprocess.run(
-            ["gh", "api", "--include", f"repos/{repo}/{endpoint}"],
-            text=True, capture_output=True, check=False,
-        )
-        statuses = re.findall(r"^HTTP/\S+\s+([0-9]{3})\b", result.stdout, re.MULTILINE)
-        status = statuses[-1] if statuses else None
-        if result.returncode != 0 and status == "404":
-            continue
-        if result.returncode == 0 and status == "200":
-            raise ValueError(f"{tag} already exists: {endpoint}")
+    result = subprocess.run(
+        ["gh", "api", "--include", f"repos/{repo}/git/ref/tags/{tag}"],
+        text=True, capture_output=True, check=False,
+    )
+    statuses = re.findall(r"^HTTP/\S+\s+([0-9]{3})\b", result.stdout, re.MULTILINE)
+    status = statuses[-1] if statuses else None
+    if result.returncode == 0 and status == "200":
+        raise ValueError(f"{tag} already exists: remote tag")
+    if result.returncode == 0 or status != "404":
         raise RuntimeError(f"Cannot establish availability of {tag}: "
                            f"{result.stdout}\n{result.stderr}")
+
+    # The release-by-tag endpoint omits drafts; list every authenticated page.
+    result = subprocess.run(
+        ["gh", "api", "--paginate", "--slurp", f"repos/{repo}/releases?per_page=100"],
+        text=True, capture_output=True, check=False,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"Cannot establish availability of {tag}: "
+                           f"{result.stdout}\n{result.stderr}")
+    try:
+        pages = json.loads(result.stdout)
+    except json.JSONDecodeError as error:
+        raise RuntimeError(f"Cannot establish availability of {tag}: malformed release list") from error
+    if not isinstance(pages, list) or not pages:
+        raise RuntimeError(f"Cannot establish availability of {tag}: missing release pages")
+    for page in pages:
+        if not isinstance(page, list):
+            raise RuntimeError(f"Cannot establish availability of {tag}: malformed release page")
+        for item in page:
+            if (not isinstance(item, dict) or not isinstance(item.get("tag_name"), str)
+                    or not item["tag_name"] or not isinstance(item.get("draft"), bool)):
+                raise RuntimeError(f"Cannot establish availability of {tag}: malformed release entry")
+            if item["tag_name"] == tag:
+                raise ValueError(f"{tag} already exists: draft or published release")
 
 
 def publish(root, repo, sha, assets):

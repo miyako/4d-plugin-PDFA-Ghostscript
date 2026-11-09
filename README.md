@@ -89,8 +89,11 @@ The manifest and 4D project schema versions are not release versions.
    separately without `--clobber`; `gh release create` is deliberately avoided
    because its failure cleanup can delete a temporary draft.
 
-Publication serializes across all branches. API/authentication/network errors
-fail closed, and existing tags/releases are never replaced. If release creation
+Publication serializes across all branches. Availability checks reject both
+draft and published releases using the authenticated, fully paginated release
+list (the release-by-tag endpoint omits drafts). Only a successful, well-formed
+complete listing with no match permits publication; API/authentication/network
+or pagination errors fail closed. Existing tags/releases are never replaced. If release creation
 or asset upload fails after tag push, the tag and any created release/uploaded
 assets remain. A published release may temporarily have incomplete assets:
 inspect the tag, release, assets, and retained package artifacts and recover

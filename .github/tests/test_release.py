@@ -90,18 +90,25 @@ def api_result(status, code=1):
     return subprocess.CompletedProcess([], code, f"HTTP/2.0 {status} Test\n\n{{}}\n", "API error")
 
 
+def release_pages(pages):
+    return subprocess.CompletedProcess([], 0, json.dumps(pages), "")
+
+
 class AvailabilityTests(unittest.TestCase):
     @patch.object(release.subprocess, "run")
     def test_only_confirmed_missing_tag_and_release_are_available(self, run):
-        run.side_effect = [api_result(404), api_result(404)]
+        run.side_effect = [api_result(404), release_pages([[]])]
         release.check_available("owner/repo", "v7.8.9")
         self.assertEqual(run.call_count, 2)
         self.assertIn("repos/owner/repo/git/ref/tags/v7.8.9", run.call_args_list[0].args[0])
-        self.assertIn("repos/owner/repo/releases/tags/v7.8.9", run.call_args_list[1].args[0])
+        self.assertEqual(run.call_args_list[1].args[0],
+                         ["gh", "api", "--paginate", "--slurp",
+                          "repos/owner/repo/releases?per_page=100"])
 
     @patch.object(release.subprocess, "run")
     def test_existing_tag_or_release(self, run):
-        for results in ([api_result(200, 0)], [api_result(404), api_result(200, 0)]):
+        for results in ([api_result(200, 0)], [api_result(404), release_pages([
+                [{"tag_name": "v7.8.9", "draft": False}]])]):
             run.side_effect = results
             with self.assertRaisesRegex(ValueError, "already exists"):
                 release.check_available("owner/repo", "v7.8.9")
@@ -114,6 +121,41 @@ class AvailabilityTests(unittest.TestCase):
                       api_result(404, 0)):
             for prefix in ([], [api_result(404)]):
                 run.side_effect = prefix + [error]
+                with self.assertRaisesRegex(RuntimeError, "Cannot establish"):
+                    release.check_available("owner/repo", "v7.8.9")
+
+    @patch.object(release.subprocess, "run")
+    def test_same_tag_draft_on_later_page_blocks(self, run):
+        run.side_effect = [api_result(404), release_pages([
+            [{"tag_name": "v7.8.10", "draft": False}],
+            [{"tag_name": "v7.8.9", "draft": True}],
+        ])]
+        with self.assertRaisesRegex(ValueError, "draft or published"):
+            release.check_available("owner/repo", "v7.8.9")
+
+    @patch.object(release.subprocess, "run")
+    def test_complete_paginated_no_match_is_available(self, run):
+        run.side_effect = [api_result(404), release_pages([
+            [{"tag_name": "v7.8.10", "draft": True}],
+            [{"tag_name": "v7.8.8", "draft": False}],
+        ])]
+        release.check_available("owner/repo", "v7.8.9")
+
+    @patch.object(release.subprocess, "run")
+    def test_failed_or_malformed_release_pages_fail_closed(self, run):
+        malformed = ([], {}, [None], [[None]], [[{}]], [[{"tag_name": "v7.8.8"}]],
+                     [[{"tag_name": 123, "draft": True}]],
+                     [[{"tag_name": "", "draft": False}]],
+                     [[{"tag_name": "v7.8.8", "draft": "false"}]],
+                     [[], {"message": "page failed"}])
+        failures = [release_pages(pages) for pages in malformed] + [
+            api_result(404), api_result(401), api_result(403), api_result(500),
+            subprocess.CompletedProcess([], 1, "[[]]", "later page network failure"),
+            subprocess.CompletedProcess([], 0, "[[", ""),
+        ]
+        for result in failures:
+            with self.subTest(result=result.stdout):
+                run.side_effect = [api_result(404), result]
                 with self.assertRaisesRegex(RuntimeError, "Cannot establish"):
                     release.check_available("owner/repo", "v7.8.9")
 
