@@ -2,6 +2,9 @@
 cmake-build/
 PDFA/cmake-build/
 
+# Python lifecycle checks
+__pycache__/
+
 # Bundled test plugins (too large for git, built by CI)
 PDFA/PDFA-test/Plugins/
 

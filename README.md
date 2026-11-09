@@ -64,3 +64,44 @@ Then bundle Ghostscript into the plugin:
 brew install verapdf
 verapdf --flavour 3b output.pdf
 ```
+
+## Release workflows
+
+`VERSION` is authoritative and must be strict `X.Y.Z`, coordinated with
+`PDFA/Info.plist`'s `CFBundleVersion` (not an independent build counter).
+The migration repaired the stale plist to the existing version without a bump.
+The manifest and 4D project schema versions are not release versions.
+
+1. Run **Bump Version** on the desired branch, choosing `patch`, `minor`, or
+   `major` in the `bump` input. It validates metadata, commits both files, and
+   pushes only that branch without tags. Concurrent bumps on the same branch
+   serialize; an advanced branch causes a non-fast-forward failure, not overwrite.
+2. Run **Build** separately on that branch. It has no inputs beyond GitHub's
+   branch selector. All checkouts use the selected immutable `github.sha`, not
+   a moving branch or tag. No main-only publication restriction is imposed.
+3. Build rejects invalid/drifting versions and existing tags or releases before
+   building Windows x64 and macOS arm64, bundling Ghostscript, verifying the
+   merged plugin, signing with Developer ID, and notarizing ZIP/DMG packages.
+   The stapled DMG is validated and packages are retained as workflow artifacts.
+   Only after these steps succeed does it recheck availability, push a
+   non-force `vX.Y.Z` tag at the exact selected SHA, and create a new release.
+
+Publication serializes across all branches. API/authentication/network errors
+fail closed, and existing tags/releases are never replaced. If release creation
+fails after tag push, the tag remains: inspect the tag, any release, and retained
+package artifacts and recover manually. Reruns reject that tag; there is no
+automatic deletion, overwrite, or rollback. Tag pushes do not start Build.
+
+The existing **Build and Test** workflow remains automatic for pushes and pull
+requests targeting `main`; it is separate from manual release publication.
+Release signing uses the existing `APPLE_DEVELOPER_ID_CERTIFICATE`,
+`APPLE_DEVELOPER_ID_CERTIFICATE_PASSWORD`, `KEYCHAIN_PASSWORD`,
+`NOTARYTOOL_APPLE_ID`, `NOTARYTOOL_TEAM_ID`, and `NOTARYTOOL_PASSWORD` secrets.
+
+Local lifecycle checks (no native builds, signing, or publication):
+
+```bash
+python3 -m pip install -r .github/tests/requirements.txt
+python3 -m unittest discover -s .github/tests -v
+actionlint .github/workflows/*.yml
+```
