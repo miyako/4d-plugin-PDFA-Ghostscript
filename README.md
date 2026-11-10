@@ -60,6 +60,49 @@ Then bundle Ghostscript into the plugin:
 
 ## Validation
 
+Native status-string ownership regression on macOS (Xcode command-line tools,
+initialized pinned SDK submodule; no Ghostscript, plugin packaging or signing):
+
+```bash
+bash tests/run-status-ownership.sh
+```
+
+The harness compiles the actual plugin source and the complete unchanged SDK,
+with an engine-boundary shim, ASan/UBSan, and explicit string/handle/object
+accounting. It checks exact ASCII, BMP, supplementary and empty content,
+allocated/null empty strings, repeated synchronous status calls, pointer-list
+allocation failure, and independent successful object handoff. The shim verifies
+the JSON Parse input and models an independently owned result; it is not a JSON
+parser or certification of the 4D engine, Ghostscript conversion, or Windows.
+
+The ownership audit at `8996d579f85bc35cd8822c28242125b746a3d77e` inventoried
+all tracked first-party native code: `PDFA/PDFA-4dplugin.cpp` contains
+`PluginMain`, `doPdfToPdfa`, `getBundlePath`, `uniToUtf8`, `returnStatus` and
+`shellEscape`. `PDFA/manifest.json` declares only selector 1, two scalar Text
+inputs and an Object result; the dispatcher reaches that command and all its
+status branches. CMake compiles that translation unit and the pinned
+`4D-Plugin-SDK` API; `PDFA.def` exports the entry points. `Info.plist`,
+the manifest copies in CMake/bundling/CI, and the 4D test project contain no
+additional native commands. There are no first-party dormant native files,
+text arrays, callbacks, pointer/object-property helpers or CPicture wrappers.
+Ghostscript and SDK internals are third-party audit exclusions.
+
+The compiled SDK is `4d/4D-Plugin-SDK` commit
+`cd97d1876d4258b56d2516e8ad2816f4ee93e0b5`, not an inferred release from its
+`rev : v14` header. Its `PA_SetStringVariable` aliases the input descriptor;
+`PA_ExecuteCommandByID` synchronously forwards parameter pointers without
+clearing them. As in the SDK's own `PA_CreateObject` JSON Parse branch,
+`returnStatus` must dispose its owned temporary after that call. The successful
+object reference is transferred by `PA_ReturnObject`, not cleared locally.
+Input parameter strings are borrowed and only read. UTF-16 conversion capacities
+and return lengths are bytes, while string lengths are UTF-16 code units.
+The same harness fails the immutable baseline on the leaked JSON input and
+passes the one-disposal fix. Failure behavior inside the real engine and
+unrelated existing error-reporting/JSON formatting limits remain outside this
+bounded ownership fix.
+
+PDF/A validation (separate from the ownership regression):
+
 ```bash
 brew install verapdf
 verapdf --flavour 3b output.pdf
